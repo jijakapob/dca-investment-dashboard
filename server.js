@@ -18,6 +18,7 @@ const mimeTypes = {
 let fundsCache = null;
 let fundsCacheTime = 0;
 const fundsCacheMs = 1000 * 60 * 60;
+let fundHistoryCache = null;
 
 function json(res, status, payload) {
   const body = JSON.stringify(payload);
@@ -136,15 +137,47 @@ async function getFinnomenaFunds() {
   return fundsCache;
 }
 
+async function getFundHistoryCache() {
+  if (fundHistoryCache) return fundHistoryCache;
+  try {
+    const raw = await readFile(join(__dirname, "data", "fund-cache.json"), "utf8");
+    fundHistoryCache = JSON.parse(raw).funds || {};
+  } catch {
+    fundHistoryCache = {};
+  }
+  return fundHistoryCache;
+}
+
 async function resolveFinnomenaFund(input) {
+  const localCode = comparableFundCode(input);
+  const localKnownFunds = {
+    "B-INNOTECH": {
+      short_code: "B-INNOTECH",
+      fund_id: "B-INNOTECH",
+      name_th: "B-INNOTECH",
+    },
+    "SCBUSFOCUS(A)": {
+      short_code: "SCBUSFOCUS(A)",
+      fund_id: "SCBUSFOCUS(A)",
+      name_th: "SCBUSFOCUS(A)",
+    },
+    "K-USXNDQ-A(A)": {
+      short_code: "K-USXNDQ-A(A)",
+      fund_id: "K-USXNDQ-A(A)",
+      name_th: "K-USXNDQ-A(A)",
+    },
+  };
+
+  const localMatch = Object.entries(localKnownFunds).find(([code]) => comparableFundCode(code) === localCode);
+  if (localMatch) return localMatch[1];
+
   const funds = await getFinnomenaFunds();
-  const wanted = comparableFundCode(input);
   const exact = funds.find(
-    (fund) => comparableFundCode(fund.short_code) === wanted || comparableFundCode(fund.fund_id) === wanted,
+    (fund) => comparableFundCode(fund.short_code) === localCode || comparableFundCode(fund.fund_id) === localCode,
   );
   if (exact) return exact;
 
-  const partial = funds.find((fund) => comparableFundCode(fund.short_code).includes(wanted));
+  const partial = funds.find((fund) => comparableFundCode(fund.short_code).includes(localCode));
   if (partial) return partial;
 
   return {
@@ -196,6 +229,18 @@ async function handleFinnomena(reqUrl, res) {
   try {
     const fund = await resolveFinnomenaFund(symbolInput);
     const symbol = fund.short_code;
+    const historyCache = await getFundHistoryCache();
+    if (historyCache[symbol]) {
+      const normalized = normalizeFinnomenaBars(historyCache[symbol], symbol);
+      return json(res, 200, {
+        ...normalized,
+        fundId: fund.fund_id,
+        displayName: fund.name_th || symbol,
+        requestedSymbol: symbolInput,
+        source: "Bundled Finnomena NAV cache",
+      });
+    }
+
     const url = `https://www.finnomena.com/fn3/api/fund/v2/public/tv/history?symbol=${encodeURIComponent(
       symbol,
     )}&resolution=D&from=${from}&to=${to}`;
