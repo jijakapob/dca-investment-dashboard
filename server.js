@@ -135,7 +135,8 @@ async function fetchSecJson(url, { key, method = "GET", body } = {}) {
     const text = await response.text();
     throw new Error(`SEC returned ${response.status}: ${text.slice(0, 180)}`);
   }
-  return response.json();
+  const text = await response.text();
+  return text ? JSON.parse(text) : null;
 }
 
 function comparableFundCode(value) {
@@ -184,7 +185,9 @@ async function getSecFunds() {
       .map((amc) =>
         fetchSecJson(`https://api.sec.or.th/FundFactsheet/fund/amc/${encodeURIComponent(amc.unique_id)}`, {
           key: secFactsheetKey,
-        }).catch(() => []),
+        })
+          .then((payload) => (Array.isArray(payload) ? payload : []))
+          .catch(() => []),
       ),
   );
 
@@ -388,16 +391,12 @@ async function handleFinnomena(reqUrl, res) {
 
   try {
     if (secFactsheetKey && secDailyInfoKey) {
-      try {
-        const secHistory = await fetchSecMonthlyHistory(symbolInput, start, end);
-        if (secHistory.rows.length) {
-          return json(res, 200, {
-            ...secHistory,
-            requestedSymbol: symbolInput,
-          });
-        }
-      } catch (error) {
-        console.warn(`SEC lookup failed for ${symbolInput}: ${error.message}`);
+      const secHistory = await fetchSecMonthlyHistory(symbolInput, start, end);
+      if (secHistory.rows.length) {
+        return json(res, 200, {
+          ...secHistory,
+          requestedSymbol: symbolInput,
+        });
       }
     }
 
@@ -430,9 +429,33 @@ async function handleFinnomena(reqUrl, res) {
   } catch (error) {
     json(res, 502, {
       error: `Could not load Thai fund "${symbolInput}". ${error.message}`,
-      hint: "Try the official short code, for example SCBUSFOCUS(A), K-USXNDQ-A(A), or B-INNOTECH.",
+      hint:
+        secFactsheetKey && secDailyInfoKey
+          ? "SEC Thai fund connection is not working yet. Check the SEC API keys in Render."
+          : "Try the official short code, for example SCBUSFOCUS(A), K-USXNDQ-A(A), or B-INNOTECH.",
     });
   }
+}
+
+async function handleSecStatus(res) {
+  if (!secFactsheetKey || !secDailyInfoKey) {
+    return json(res, 200, {
+      configured: false,
+      factsheet: "missing",
+      dailyInfo: "missing",
+    });
+  }
+
+  const [factsheet, dailyInfo] = await Promise.allSettled([
+    fetchSecJson("https://api.sec.or.th/FundFactsheet/fund/amc", { key: secFactsheetKey }),
+    fetchSecJson("https://api.sec.or.th/FundDailyInfo/2026-01-02", { key: secDailyInfoKey }),
+  ]);
+
+  return json(res, 200, {
+    configured: true,
+    factsheet: factsheet.status === "fulfilled" ? "ok" : factsheet.reason.message,
+    dailyInfo: dailyInfo.status === "fulfilled" ? "ok" : dailyInfo.reason.message,
+  });
 }
 
 async function handleStatic(pathname, res) {
@@ -467,6 +490,10 @@ createServer(async (req, res) => {
   }
   if (reqUrl.pathname === "/api/history/finnomena") {
     await handleFinnomena(reqUrl, res);
+    return;
+  }
+  if (reqUrl.pathname === "/api/sec-status") {
+    await handleSecStatus(res);
     return;
   }
   await handleStatic(reqUrl.pathname, res);
