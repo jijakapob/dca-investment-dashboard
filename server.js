@@ -302,23 +302,30 @@ async function findSecFund(symbol) {
   ];
 
   let lastError;
-  for (const body of candidateBodies) {
-    try {
-      const payload = await fetchSecJson("https://api.sec.or.th/FundFactsheet/fund/class_fund", {
-        key: secFactsheetKey,
-        method: "POST",
-        body,
-      });
-      const rows = Array.isArray(payload) ? payload : [];
-      const exact = rows.find(
-        (row) =>
-          comparableFundCode(row.class_abbr_name) === comparableFundCode(symbol) ||
-          comparableFundCode(row.proj_abbr_name) === comparableFundCode(symbol),
-      );
-      if (exact) return exact;
-      if (rows[0]) return rows[0];
-    } catch (error) {
-      lastError = error;
+  const lookupUrls = [
+    "https://api.sec.or.th/FundFactsheet/fund",
+    "https://api.sec.or.th/FundFactsheet/fund/class_fund",
+  ];
+  for (const url of lookupUrls) {
+    for (const body of candidateBodies) {
+      try {
+        const payload = await fetchSecJson(url, {
+          key: secFactsheetKey,
+          method: "POST",
+          body,
+        });
+        const rows = Array.isArray(payload) ? payload : [];
+        const exact = rows.find((row) =>
+          fundCodeCandidates(row).some((candidate) => comparableFundCode(candidate) === localCode),
+        );
+        if (exact) return exact;
+        const partial = rows.find((row) =>
+          fundCodeCandidates(row).some((candidate) => comparableFundCode(candidate).includes(localCode)),
+        );
+        if (partial) return partial;
+      } catch (error) {
+        lastError = error;
+      }
     }
   }
   if (lastError) throw lastError;
@@ -470,7 +477,7 @@ async function handleSecStatus(res) {
 
   const [factsheet, dailyInfo] = await Promise.allSettled([
     fetchSecJson("https://api.sec.or.th/FundFactsheet/fund/amc", { key: secFactsheetKey }),
-    fetchSecJson("https://api.sec.or.th/FundDailyInfo/2026-01-02", { key: secDailyInfoKey }),
+    fetchSecJson("https://api.sec.or.th/FundDailyInfo/amc", { key: secDailyInfoKey }),
   ]);
 
   return json(res, 200, {
