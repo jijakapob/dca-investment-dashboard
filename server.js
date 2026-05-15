@@ -143,7 +143,18 @@ function comparableFundCode(value) {
   return String(value || "")
     .toUpperCase()
     .replace(/\s+/g, "")
+    .replace(/[()]/g, "")
     .trim();
+}
+
+function fundCodeCandidates(fund) {
+  return [
+    fund?.proj_abbr_name,
+    fund?.class_abbr_name,
+    fund?.fund_abbr_name,
+    fund?.proj_name_en,
+    fund?.proj_name_th,
+  ].filter(Boolean);
 }
 
 async function getFinnomenaFunds() {
@@ -273,8 +284,15 @@ function normalizeSecNavPayload(payload) {
 async function findSecFund(symbol) {
   const localCode = comparableFundCode(symbol);
   const secFunds = await getSecFunds();
-  const projectMatch = secFunds.find((fund) => comparableFundCode(fund.proj_abbr_name) === localCode);
-  if (projectMatch) return projectMatch;
+  const exactMatch = secFunds.find((fund) =>
+    fundCodeCandidates(fund).some((candidate) => comparableFundCode(candidate) === localCode),
+  );
+  if (exactMatch) return exactMatch;
+
+  const partialMatch = secFunds.find((fund) =>
+    fundCodeCandidates(fund).some((candidate) => comparableFundCode(candidate).includes(localCode)),
+  );
+  if (partialMatch) return partialMatch;
 
   const candidateBodies = [
     { class_abbr_name: symbol },
