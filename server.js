@@ -157,6 +157,10 @@ function fundCodeCandidates(fund) {
   ].filter(Boolean);
 }
 
+function fundAbbreviationCandidates(fund) {
+  return [fund?.proj_abbr_name, fund?.class_abbr_name, fund?.fund_abbr_name].filter(Boolean);
+}
+
 async function getFinnomenaFunds() {
   const now = Date.now();
   if (fundsCache && now - fundsCacheTime < fundsCacheMs) return fundsCache;
@@ -289,11 +293,6 @@ async function findSecFund(symbol) {
   );
   if (exactMatch) return exactMatch;
 
-  const partialMatch = secFunds.find((fund) =>
-    fundCodeCandidates(fund).some((candidate) => comparableFundCode(candidate).includes(localCode)),
-  );
-  if (partialMatch) return partialMatch;
-
   const candidateBodies = [
     { class_abbr_name: symbol },
     { proj_abbr_name: symbol },
@@ -328,6 +327,13 @@ async function findSecFund(symbol) {
       }
     }
   }
+
+  // Only use a loose fallback against actual abbreviations, never against long fund names.
+  const partialMatch = secFunds.find((fund) =>
+    fundAbbreviationCandidates(fund).some((candidate) => comparableFundCode(candidate).includes(localCode)),
+  );
+  if (partialMatch) return partialMatch;
+
   if (lastError) throw lastError;
   throw new Error(`SEC could not find fund "${symbol}"`);
 }
