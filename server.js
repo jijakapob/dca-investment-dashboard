@@ -19,6 +19,8 @@ let fundsCache = null;
 let fundsCacheTime = 0;
 const fundsCacheMs = 1000 * 60 * 60;
 let fundHistoryCache = null;
+let secFundsCache = null;
+let secFundsCacheTime = 0;
 const secFactsheetKey = process.env.SEC_FACTSHEET_KEY || "";
 const secDailyInfoKey = process.env.SEC_DAILYINFO_KEY || "";
 
@@ -167,6 +169,30 @@ async function getFundHistoryCache() {
   return fundHistoryCache;
 }
 
+async function getSecFunds() {
+  const now = Date.now();
+  if (secFundsCache && now - secFundsCacheTime < fundsCacheMs) return secFundsCache;
+
+  const amcs = await fetchSecJson("https://api.sec.or.th/FundFactsheet/fund/amc", {
+    key: secFactsheetKey,
+  });
+  if (!Array.isArray(amcs)) throw new Error("SEC fund AMC list was not an array");
+
+  const groupedFunds = await Promise.all(
+    amcs
+      .filter((amc) => amc?.unique_id)
+      .map((amc) =>
+        fetchSecJson(`https://api.sec.or.th/FundFactsheet/fund/amc/${encodeURIComponent(amc.unique_id)}`, {
+          key: secFactsheetKey,
+        }).catch(() => []),
+      ),
+  );
+
+  secFundsCache = groupedFunds.flat().filter((fund) => fund?.proj_id && fund?.proj_abbr_name);
+  secFundsCacheTime = now;
+  return secFundsCache;
+}
+
 async function resolveFinnomenaFund(input) {
   const localCode = comparableFundCode(input);
   const localKnownFunds = {
@@ -242,6 +268,11 @@ function normalizeSecNavPayload(payload) {
 }
 
 async function findSecFund(symbol) {
+  const localCode = comparableFundCode(symbol);
+  const secFunds = await getSecFunds();
+  const projectMatch = secFunds.find((fund) => comparableFundCode(fund.proj_abbr_name) === localCode);
+  if (projectMatch) return projectMatch;
+
   const candidateBodies = [
     { class_abbr_name: symbol },
     { proj_abbr_name: symbol },
