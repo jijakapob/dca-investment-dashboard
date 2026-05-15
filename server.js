@@ -19,6 +19,8 @@ let fundsCache = null;
 let fundsCacheTime = 0;
 const fundsCacheMs = 1000 * 60 * 60;
 let fundHistoryCache = null;
+const secFactsheetKey = process.env.SEC_FACTSHEET_KEY || "";
+const secDailyInfoKey = process.env.SEC_DAILYINFO_KEY || "";
 
 function json(res, status, payload) {
   const body = JSON.stringify(payload);
@@ -117,6 +119,23 @@ async function fetchJson(url) {
   return response.json();
 }
 
+async function fetchSecJson(url, { key, method = "GET", body } = {}) {
+  if (!key) throw new Error("SEC API key is not configured");
+  const response = await fetch(url, {
+    method,
+    headers: {
+      "content-type": "application/json",
+      "Ocp-Apim-Subscription-Key": key,
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`SEC returned ${response.status}: ${text.slice(0, 180)}`);
+  }
+  return response.json();
+}
+
 function comparableFundCode(value) {
   return String(value || "")
     .toUpperCase()
@@ -187,6 +206,116 @@ async function resolveFinnomenaFund(input) {
   };
 }
 
+function monthWindows(startMonth, endMonth) {
+  const months = [];
+  const cursor = new Date(`${startMonth.slice(0, 7)}-01T00:00:00Z`);
+  const end = new Date(`${endMonth.slice(0, 7)}-01T00:00:00Z`);
+  while (cursor <= end) {
+    const year = cursor.getUTCFullYear();
+    const month = cursor.getUTCMonth();
+    const first = new Date(Date.UTC(year, month, 1));
+    const last = new Date(Date.UTC(year, month + 1, 0));
+    months.push({ first, last });
+    cursor.setUTCMonth(cursor.getUTCMonth() + 1);
+  }
+  return months;
+}
+
+function dateText(date) {
+  return date.toISOString().slice(0, 10);
+}
+
+function shiftedDate(base, days) {
+  const copy = new Date(base);
+  copy.setUTCDate(copy.getUTCDate() + days);
+  return copy;
+}
+
+function normalizeSecNavPayload(payload) {
+  const rows = Array.isArray(payload) ? payload : payload ? [payload] : [];
+  return rows
+    .map((row) => ({
+      date: row.nav_date,
+      close: Number(row.last_val),
+    }))
+    .filter((row) => /^\d{4}-\d{2}-\d{2}$/.test(row.date) && Number.isFinite(row.close));
+}
+
+async function findSecFund(symbol) {
+  const candidateBodies = [
+    { class_abbr_name: symbol },
+    { proj_abbr_name: symbol },
+    { search: symbol },
+    { fund: symbol },
+  ];
+
+  let lastError;
+  for (const body of candidateBodies) {
+    try {
+      const payload = await fetchSecJson("https://api.sec.or.th/FundFactsheet/fund/class_fund", {
+        key: secFactsheetKey,
+        method: "POST",
+        body,
+      });
+      const rows = Array.isArray(payload) ? payload : [];
+      const exact = rows.find(
+        (row) =>
+          comparableFundCode(row.class_abbr_name) === comparableFundCode(symbol) ||
+          comparableFundCode(row.proj_abbr_name) === comparableFundCode(symbol),
+      );
+      if (exact) return exact;
+      if (rows[0]) return rows[0];
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  if (lastError) throw lastError;
+  throw new Error(`SEC could not find fund "${symbol}"`);
+}
+
+async function fetchSecNavOnDate(projId, date) {
+  const payload = await fetchSecJson(
+    `https://api.sec.or.th/FundDailyInfo/${encodeURIComponent(projId)}/dailynav/${date}`,
+    { key: secDailyInfoKey },
+  );
+  return normalizeSecNavPayload(payload)[0] || null;
+}
+
+async function findSecNavNearDate(projId, baseDate, direction) {
+  for (let offset = 0; offset <= 10; offset += 1) {
+    const date = dateText(shiftedDate(baseDate, direction * offset));
+    try {
+      const row = await fetchSecNavOnDate(projId, date);
+      if (row) return row;
+    } catch (error) {
+      if (!String(error.message).includes("404")) throw error;
+    }
+  }
+  return null;
+}
+
+async function fetchSecMonthlyHistory(symbol, start, end) {
+  const fund = await findSecFund(symbol);
+  if (!fund?.proj_id) throw new Error(`SEC fund lookup returned no proj_id for "${symbol}"`);
+  const rows = [];
+  for (const window of monthWindows(start, end)) {
+    const first = await findSecNavNearDate(fund.proj_id, window.first, 1);
+    const last = await findSecNavNearDate(fund.proj_id, window.last, -1);
+    if (first) rows.push(first);
+    if (last && last.date !== first?.date) rows.push(last);
+  }
+  rows.sort((a, b) => a.date.localeCompare(b.date));
+  return {
+    symbol,
+    currency: "THB",
+    exchange: "SEC Thailand",
+    rows,
+    source: "SEC Thailand Fund Daily Info API",
+    fundId: fund.proj_id,
+    displayName: fund.class_abbr_name || fund.proj_abbr_name || symbol,
+  };
+}
+
 async function handleYahoo(reqUrl, res) {
   const symbol = reqUrl.searchParams.get("symbol")?.trim();
   const start = reqUrl.searchParams.get("start") || "2021-04-01";
@@ -227,6 +356,20 @@ async function handleFinnomena(reqUrl, res) {
   if (!from || !to) return json(res, 400, { error: "Invalid date range" });
 
   try {
+    if (secFactsheetKey && secDailyInfoKey) {
+      try {
+        const secHistory = await fetchSecMonthlyHistory(symbolInput, start, end);
+        if (secHistory.rows.length) {
+          return json(res, 200, {
+            ...secHistory,
+            requestedSymbol: symbolInput,
+          });
+        }
+      } catch (error) {
+        console.warn(`SEC lookup failed for ${symbolInput}: ${error.message}`);
+      }
+    }
+
     const fund = await resolveFinnomenaFund(symbolInput);
     const symbol = fund.short_code;
     const historyCache = await getFundHistoryCache();
