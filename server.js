@@ -427,6 +427,7 @@ async function handleFinnomena(reqUrl, res) {
           requestedSymbol: symbolInput,
         });
       }
+      throw new Error(`SEC returned no NAV rows for "${symbolInput}"`);
     }
 
     const fund = await resolveFinnomenaFund(symbolInput);
@@ -487,6 +488,24 @@ async function handleSecStatus(res) {
   });
 }
 
+async function handleSecFundDebug(reqUrl, res) {
+  const symbol = reqUrl.searchParams.get("symbol")?.trim().toUpperCase();
+  if (!symbol) return json(res, 400, { error: "Missing symbol" });
+  try {
+    const fund = await findSecFund(symbol);
+    return json(res, 200, {
+      symbol,
+      matched: fund,
+      candidates: fundCodeCandidates(fund),
+    });
+  } catch (error) {
+    return json(res, 404, {
+      symbol,
+      error: error.message,
+    });
+  }
+}
+
 async function handleStatic(pathname, res) {
   const requested = pathname === "/" ? "/index.html" : pathname;
   const safePath = normalize(requested).replace(/^(\.\.[/\\])+/, "");
@@ -523,6 +542,10 @@ createServer(async (req, res) => {
   }
   if (reqUrl.pathname === "/api/sec-status") {
     await handleSecStatus(res);
+    return;
+  }
+  if (reqUrl.pathname === "/api/sec-fund-debug") {
+    await handleSecFundDebug(reqUrl, res);
     return;
   }
   await handleStatic(reqUrl.pathname, res);
