@@ -346,16 +346,19 @@ async function findSecNavNearDate(projId, baseDate, direction) {
   return null;
 }
 
-async function fetchSecMonthlyHistory(symbol, start, end) {
+async function fetchSecMonthlyHistory(symbol, start, end, timing = "first") {
   const fund = await findSecFund(symbol);
   if (!fund?.proj_id) throw new Error(`SEC fund lookup returned no proj_id for "${symbol}"`);
-  const rows = [];
-  for (const window of monthWindows(start, end)) {
-    const first = await findSecNavNearDate(fund.proj_id, window.first, 1);
-    const last = await findSecNavNearDate(fund.proj_id, window.last, -1);
-    if (first) rows.push(first);
-    if (last && last.date !== first?.date) rows.push(last);
-  }
+  const windows = monthWindows(start, end);
+  const monthlyRows = await Promise.all(
+    windows.map(async (window) => {
+      if (timing === "last") return findSecNavNearDate(fund.proj_id, window.last, -1);
+      return findSecNavNearDate(fund.proj_id, window.first, 1);
+    }),
+  );
+  const latest = await findSecNavNearDate(fund.proj_id, windows.at(-1).last, -1);
+  const rows = monthlyRows.filter(Boolean);
+  if (latest && !rows.some((row) => row.date === latest.date)) rows.push(latest);
   rows.sort((a, b) => a.date.localeCompare(b.date));
   return {
     symbol,
@@ -401,6 +404,7 @@ async function handleFinnomena(reqUrl, res) {
   const symbolInput = reqUrl.searchParams.get("symbol")?.trim().toUpperCase();
   const start = reqUrl.searchParams.get("start") || "2021-04-01";
   const end = reqUrl.searchParams.get("end") || "2026-04-30";
+  const timing = reqUrl.searchParams.get("timing") === "last" ? "last" : "first";
   if (!symbolInput) return json(res, 400, { error: "Missing fund code" });
 
   const from = toUnix(start);
@@ -409,7 +413,7 @@ async function handleFinnomena(reqUrl, res) {
 
   try {
     if (secFactsheetKey && secDailyInfoKey) {
-      const secHistory = await fetchSecMonthlyHistory(symbolInput, start, end);
+      const secHistory = await fetchSecMonthlyHistory(symbolInput, start, end, timing);
       if (secHistory.rows.length) {
         return json(res, 200, {
           ...secHistory,
