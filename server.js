@@ -139,6 +139,58 @@ async function fetchSecJson(url, { key, method = "GET", body } = {}) {
   return text ? JSON.parse(text) : null;
 }
 
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function cookiePairs(jar) {
+  return Object.entries(jar)
+    .map(([name, value]) => `${name}=${value}`)
+    .join("; ");
+}
+
+function storeSetCookies(jar, response) {
+  const setCookies =
+    typeof response.headers.getSetCookie === "function"
+      ? response.headers.getSetCookie()
+      : [response.headers.get("set-cookie")].filter(Boolean);
+  setCookies.forEach((cookie) => {
+    const pair = cookie.split(";")[0];
+    const index = pair.indexOf("=");
+    if (index > 0) jar[pair.slice(0, index)] = pair.slice(index + 1);
+  });
+}
+
+async function fetchScbam(url, { method = "GET", body, jar = {} } = {}) {
+  const response = await fetch(url, {
+    method,
+    headers: {
+      "user-agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+      accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "content-type": body ? "application/x-www-form-urlencoded; charset=UTF-8" : undefined,
+      cookie: cookiePairs(jar) || undefined,
+    },
+    body,
+  });
+  storeSetCookies(jar, response);
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`SCBAM returned ${response.status}: ${text.slice(0, 180)}`);
+  }
+  return response.text();
+}
+
+function ymdToDmy(value) {
+  const [year, month, day] = String(value || "").slice(0, 10).split("-");
+  return `${day}/${month}/${year}`;
+}
+
+function dmyToYmd(value) {
+  const [day, month, year] = String(value || "").split("/");
+  return `${year}-${month}-${day}`;
+}
+
 function comparableFundCode(value) {
   return String(value || "")
     .toUpperCase()
@@ -384,6 +436,96 @@ async function fetchSecMonthlyHistory(symbol, start, end, timing = "first") {
   };
 }
 
+async function findScbamFundId(symbol) {
+  const cleanSymbol = String(symbol || "").trim().toUpperCase();
+  const jar = {};
+  const html = await fetchScbam("https://www.scbam.com/en/fund/nav-historical/", { jar });
+  const fundRegex = new RegExp(
+    `<span class="newFont">\\s*${escapeRegExp(cleanSymbol)}\\s*</span>[\\s\\S]{0,700}?value="(\\d+)"`,
+    "i",
+  );
+  const match = html.match(fundRegex);
+  if (!match) throw new Error(`SCBAM could not find fund "${cleanSymbol}"`);
+  return { fundId: match[1], jar };
+}
+
+function normalizeScbamHistoricalHtml(html, symbol) {
+  const cleanSymbol = String(symbol || "").trim().toUpperCase();
+  const text = html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+  const rowRegex = new RegExp(
+    `Date\\s+(\\d{2}/\\d{2}/\\d{4})\\s+${escapeRegExp(cleanSymbol)}\\s+([0-9]+(?:\\.[0-9]+)?)`,
+    "g",
+  );
+  const rows = [];
+  let match;
+  while ((match = rowRegex.exec(text))) {
+    rows.push({
+      date: dmyToYmd(match[1]),
+      close: Number(match[2]),
+    });
+  }
+  return rows
+    .filter((row) => /^\d{4}-\d{2}-\d{2}$/.test(row.date) && Number.isFinite(row.close))
+    .sort((a, b) => a.date.localeCompare(b.date));
+}
+
+async function fetchScbamMonthlyHistory(symbol, start, end) {
+  const cleanSymbol = String(symbol || "").trim().toUpperCase();
+  if (!cleanSymbol.startsWith("SCB")) throw new Error(`SCBAM fallback only supports SCBAM fund codes`);
+
+  const { fundId, jar } = await findScbamFundId(cleanSymbol);
+  await fetchScbam("https://www.scbam.com/nav-compare", {
+    method: "POST",
+    body: `sess%5B%5D=${encodeURIComponent(fundId)}`,
+    jar,
+  });
+  const html = await fetchScbam("https://www.scbam.com/en/fund/nav-historical/", {
+    method: "POST",
+    body: new URLSearchParams({
+      start: ymdToDmy(start),
+      end: ymdToDmy(end),
+    }).toString(),
+    jar,
+  });
+  const rows = normalizeScbamHistoricalHtml(html, cleanSymbol);
+  if (!rows.length) throw new Error(`SCBAM returned no NAV rows for "${cleanSymbol}"`);
+  return {
+    symbol: cleanSymbol,
+    currency: "THB",
+    exchange: "SCBAM",
+    rows,
+    source: "SCBAM NAV Historical",
+    fundId,
+    displayName: cleanSymbol,
+  };
+}
+
+async function fetchThaiFundHistory(symbol, start, end, timing = "first") {
+  let secError;
+  if (secFactsheetKey && secDailyInfoKey) {
+    try {
+      const secHistory = await fetchSecMonthlyHistory(symbol, start, end, timing);
+      if (secHistory.rows.length) return secHistory;
+      secError = new Error(`SEC returned no NAV rows for "${symbol}"`);
+    } catch (error) {
+      secError = error;
+    }
+  }
+
+  const cleanSymbol = String(symbol || "").trim().toUpperCase();
+  if (cleanSymbol.startsWith("SCB")) {
+    try {
+      return await fetchScbamMonthlyHistory(cleanSymbol, start, end);
+    } catch (scbamError) {
+      const secText = secError ? `SEC: ${secError.message}. ` : "";
+      throw new Error(`${secText}SCBAM: ${scbamError.message}`);
+    }
+  }
+
+  if (secError) throw secError;
+  throw new Error(`No Thai fund data source is configured for "${symbol}"`);
+}
+
 async function handleYahoo(reqUrl, res) {
   const symbol = reqUrl.searchParams.get("symbol")?.trim();
   const start = reqUrl.searchParams.get("start") || "2021-04-01";
@@ -426,14 +568,11 @@ async function handleFinnomena(reqUrl, res) {
 
   try {
     if (secFactsheetKey && secDailyInfoKey) {
-      const secHistory = await fetchSecMonthlyHistory(symbolInput, start, end, timing);
-      if (secHistory.rows.length) {
-        return json(res, 200, {
-          ...secHistory,
-          requestedSymbol: symbolInput,
-        });
-      }
-      throw new Error(`SEC returned no NAV rows for "${symbolInput}"`);
+      const thaiHistory = await fetchThaiFundHistory(symbolInput, start, end, timing);
+      return json(res, 200, {
+        ...thaiHistory,
+        requestedSymbol: symbolInput,
+      });
     }
 
     const fund = await resolveFinnomenaFund(symbolInput);
