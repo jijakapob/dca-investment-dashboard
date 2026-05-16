@@ -512,6 +512,26 @@ async function handleSecFundDebug(reqUrl, res) {
   }
 }
 
+async function handleSecSearchDebug(reqUrl, res) {
+  const query = comparableFundCode(reqUrl.searchParams.get("query"));
+  if (!query) return json(res, 400, { error: "Missing query" });
+  const funds = await getSecFunds();
+  const matches = funds
+    .filter((fund) =>
+      fundCodeCandidates(fund).some((candidate) => comparableFundCode(candidate).includes(query)),
+    )
+    .slice(0, 20)
+    .map((fund) => ({
+      proj_id: fund.proj_id,
+      proj_abbr_name: fund.proj_abbr_name,
+      class_abbr_name: fund.class_abbr_name,
+      fund_abbr_name: fund.fund_abbr_name,
+      proj_name_en: fund.proj_name_en,
+      fund_status: fund.fund_status,
+    }));
+  return json(res, 200, { query, matches });
+}
+
 async function handleStatic(pathname, res) {
   const requested = pathname === "/" ? "/index.html" : pathname;
   const safePath = normalize(requested).replace(/^(\.\.[/\\])+/, "");
@@ -552,6 +572,10 @@ createServer(async (req, res) => {
   }
   if (reqUrl.pathname === "/api/sec-fund-debug") {
     await handleSecFundDebug(reqUrl, res);
+    return;
+  }
+  if (reqUrl.pathname === "/api/sec-search-debug") {
+    await handleSecSearchDebug(reqUrl, res);
     return;
   }
   await handleStatic(reqUrl.pathname, res);
